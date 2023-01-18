@@ -1,0 +1,696 @@
+---
+title: "Satellite imagery composites analysis and classification"
+author: "Kristian Rubiano"
+output: html_document
+params:
+  park: CORDILLERA_DE_LOS_PICACHOS
+  year: 2018
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+# `r paste(params$park, params$year)` imagery processing
+
+## Satellite imagery composites analysis and exploration
+
+### Load required packages 
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(raster)
+library(mapview)
+library(sf)
+library(dplyr)
+library(gridExtra)
+library(corrplot)
+library(caret)
+library(doParallel)
+library(NeuralNetTools)
+library(tmap)
+library(stringr)
+library(lubridate)
+library(randomcoloR)
+```
+
+
+### Load and explore the data
+
+```{r load data}
+landsat <- brick(paste0("pa_clips/", params$park, "_", params$year, ".tif"))
+names(landsat) <- c("Band_1", "Band_2", "Band_3", "Band_4", "Band_5", "Band_6")
+polygons <- read_sf("training_samples", params$park)
+if (params$year == 2000) {
+  polygons <- subset(polygons, X2000 == 1)
+} else {
+  polygons <- subset(polygons, X2018 == 1)
+}
+polygons$id <- seq.int(nrow(polygons))
+```
+
+Explore satellite imagery composite metadata.
+
+```{r print landsat}
+print(landsat)
+```
+
+Explore reference polygons metadata.
+
+```{r print polygons}
+print(polygons)
+```
+
+Visualize satellite imagery composite bands.
+
+```{r plot landsat}
+plot(landsat)
+```
+ 
+Explore satellite imagery composite (RGB453).
+ 
+```{r landsat view, message=F, warning=F}
+viewRGB(landsat, r = 4, g = 5, b = 3, quantiles = NULL, map.types = "Esri.WorldImagery")
+```
+
+
+## Extracting spectral data for regions of interests and target year
+ 
+Extract the spectral data from the pixels covered by the reference polygons and create a data frame with spectral values by band and land cover class id. Filter spectral data by target year and remove NAs.
+ 
+```{r extract data, message=F, warning=F}
+data_points <- extract(landsat, polygons, df = TRUE)
+data_points <- merge(data_points, polygons, by.x = "ID", by.y = "id")
+data_points <- na.omit(data_points)
+```
+
+Create a data frame with land cover ids and names, and filter it with the land covers present in the study area, before converting land cover names into factors.
+
+```{r lc table}
+lc <- data.frame(ID = c(1:13), lc = c("Water bodies",
+                                      "Forests",
+                                      "Shrublands",
+                                      "Grasslands",
+                                      "Secondary vegetation",
+                                      "Crops",
+                                      "Pastures",
+                                      "Artificial surfaces",
+                                      "Exposed soils",
+                                      "Clouds",
+                                      "Shadows",
+                                      "Snow",
+                                      "Planted forests"))
+index <- lc$ID %in% data_points$class
+lc <- dplyr::filter(lc, index)
+
+if(length(setdiff(unique(data_points$class), lc$ID)) > 0) {
+  for(i in setdiff(unique(data_points$class), lc$ID)) {
+    lc <- rbind(lc, data.frame(ID = i,lc = paste(lc$lc[lc$ID == as.integer(substr(as.character(i), 1, 1))], substr(as.character(i), 2, nchar(i)))))
+  }
+}
+
+lc$lc <- factor(lc$lc, levels = lc$lc, ordered = TRUE)
+print(lc)
+```
+
+Add land cover name to the spectral data and remove unnecessary columns.
+
+```{r add lc}
+data_points <- merge(data_points, lc, by.x = "class", by.y = "ID")
+data_points <- select(data_points, -ID, -X2000, -X2018, -geometry, -class)
+names(data_points) <- c("Band_1", "Band_2", "Band_3", "Band_4", "Band_5", "Band_6", "lc")
+saveRDS(data_points, file = paste0("training_df/", params$park, "_", params$year, ".RDS"))
+head(data_points)
+```
+
+
+## Creating a spectral profile
+ 
+Compute the spectral data mean by band and land cover class, and manipulate to create a matrix.
+ 
+```{r spectral matrix, warning=F, message=F}
+mr <- aggregate(data_points, list(data_points$lc), mean, na.rm = TRUE)
+rownames(mr) <- mr[,1]
+mr <- mr[,-1]
+mr <- mr[,-7]
+mr <- as.matrix(mr)
+print(mr)
+```
+
+Generate land cover legend colors according to the RGB combinations suggested by Corine Land Cover classification.
+
+```{r colors}
+colors <- c(wbod_col = rgb(0, 169, 230, max = 255),
+for_col = rgb(56, 168, 0, max = 255),
+shr_col = rgb(205, 205, 102, max = 255),
+gra_col = rgb(255, 255, 166, max = 255),
+sveg_col = rgb(105, 205, 102,max = 255),
+cro_col = rgb(255, 170, 0, max = 255),
+pas_col = rgb(255, 255, 0, max = 255),
+asur_col = rgb(78, 78, 78, max = 255),
+eso_col = rgb(137, 90, 68, max = 255),
+clo_col = rgb(190, 232, 255, max = 255),
+sha_col = rgb(0, 0, 0, max = 255),
+sno_col = rgb(204, 255, 204, max = 255),
+pfor_col = rgb(0, 97, 84, max = 255))
+mycolors <- colors[lc$ID]
+
+if(any(is.na(mycolors))) {
+  for(i in which(is.na(mycolors))) {
+    mycolors[i] <- randomColor()
+  }
+}
+names(mycolors) <- lc$lc
+
+par(mar = rep(0, 4))
+pie(rep(1, length(mycolors)), col = mycolors, labels = names(mycolors), main = "Land cover legend color palette")
+```
+ 
+Plot spectral profile.
+ 
+```{r spectral profile}
+plot(0, ylim=c(0, max(mr)+100), xlim = c(1,6), type="n", xlab="Bands", ylab="Reflectance")
+for (i in 1:nrow(mr)){lines(mr[i,], type = "l", lwd = 4, lty = 1, col = mycolors[i])}
+title(main= paste("Spectral Profile from", str_to_sentence(params$park), params$year, "composite"), font.main = 2)
+grid()
+legend("topleft", rownames(mr), cex=0.8, col=mycolors, lty=1, lwd=5, bty="n")
+```
+ 
+
+## Split reference data
+ 
+Splits the total data set into 2/3 training data and 1/3 test data for Machine Learning (ML) algorithms training and testing. Seed is set for reproducibility. For samples bigger than 10000 samples, if any class have more than 1500 samples a random subsample of 1500 samples is randomly selected to create training and testing datasets, as big training samples demand more memory and increase processing time. Not included samples are added to testing dataset.
+ 
+```{r split data, warning=F, message=F}
+seed <- 100
+set.seed(seed)
+extra_points <- data.frame(matrix(nrow = 0, ncol = 7))
+names(extra_points) <- names(data_points)
+
+if(sum(table(data_points$lc)) > 10000) {
+  for(class in unique(data_points$lc)){
+    if(length(data_points$lc[data_points$lc == class]) > 1500) {
+      x <- sample(which(data_points$lc == class), 1500, replace = FALSE)
+      y <- setdiff(which(data_points$lc == class), x)
+      extra_points <- rbind(extra_points, data_points[y,])
+      data_points <- data_points[-y,]
+      }
+    }
+}
+
+inTraining <- createDataPartition(data_points$lc, p = 2/3, list = FALSE)
+training <- data_points[inTraining,]
+testing <- data_points[-inTraining,]
+testing <- rbind(testing, extra_points)
+```
+ 
+Explore the imbalance of the training dataset.
+ 
+```{r training freq}
+training_freq <- data.frame(table(training$lc))
+training_freq$prop <- round(training_freq$Freq/sum(training_freq$Freq),4)
+training_freq <- filter(training_freq, Freq > 0)
+names(training_freq) <- c("lc", "frequence", "proportion")
+print(training_freq)
+```
+
+
+## Explore training data
+ 
+Creating density estimation plots.
+
+```{r density plot}
+ord <- c("Band_4", "Band_5", "Band_6", "Band_1", "Band_2", "Band_3")
+featurePlot(x = training[ord],
+            y = training$lc,
+            plot = "density",
+            labels=c("Reflectance", "Density distribution"),
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            order = TRUE,
+            pch = "|",
+            col = mycolors,
+            layout = c(3, 2),
+            auto.key = list(columns = 4),
+            main = "Training data set classes distrubution per band")
+```
+ 
+Display the box plots for each attribute by class value.
+ 
+```{r boxplot}
+ord <- c("Band_5", "Band_6", "Band_3", "Band_4", "Band_1", "Band_2")
+featurePlot(x=training[ord],
+            y=training$lc,
+            plot="box",
+            scales=list(y=list(relation="free"),
+                        x=list(rot=90)),
+            layout=c(2,3),
+            auto.key=list(columns=2),
+            main = "Training dataset classes boxplots per band")
+```
+ 
+Create scatter plots to check the relationships between bands in the feature space.
+ 
+```{r pairs plot}
+featurePlot(x = training[, 1:6],
+            y = training$lc,
+            plot = "pairs",
+            col = mycolors,
+            auto.key=list(columns=4),
+            main = "Training dataset classes feature space")
+```
+ 
+Check correlation for the six bands.
+ 
+```{r corrplot}
+bandCorrelations <- cor(training[, 1:6])
+corrplot(bandCorrelations, method = "number", type ="upper")
+```
+
+
+## ML algorithms tuning and training
+
+Parameters for ML algorithms tuning and training are set. Training dataset is divided into 5 groups for cross validation leaving one group out every time. This procedure is repeated 5 times. Error and accuracy are estimated as the mean of every iteration. The combination of parameters with the best model accuracy are used for the algorithm training. RF doesn't use subsampling to balance training samples, as the memory requirements exceed available memory.
+
+```{r fitcontrol_rf}
+fitControl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+```
+
+
+### Random Forest algorithm training
+
+```{r rf_training}
+set.seed(seed)
+cl <- makePSOCKcluster(19)
+timeStart<- proc.time()
+registerDoParallel(cl)
+rf_model <- train(lc~.,
+                  data=training,
+                  method="rf",
+                  trControl=fitControl,
+                  prox=TRUE,
+                  fitBest = FALSE,
+                  returnData = TRUE)
+stopCluster(cl)
+proc.time() - timeStart
+
+```
+
+After the model tuning has finished, the model is trained with the best parameters setup, looking for the greater overall accuracy. The characteristics of the model, as well as the overall accuracy achieved for the different parameters and the feature importance are shown.
+
+```{r rf_model}
+print(rf_model)
+plot(rf_model, main = "RF algorithm parameters tuning")
+rf_model$finalModel
+rf_varImp <- varImp(rf_model, compete = FALSE)
+plot(rf_varImp, main = "RF algorithm training - variables importance")
+```
+
+The model classifies the testing data to evaluate its performance and accuracy.
+
+```{r rf_pred_valid}
+pred_rf <- predict(rf_model$finalModel, newdata = testing)
+confusionMatrix(data = pred_rf, testing$lc)
+```
+
+
+### KNN algorithm training
+
+The other four ML algorithms (excluding RF) use upsampling to randomly sample (with replacement) the minority classes to be the same size as the majority class. This helps to deal with training data imbalance, which has shown to reduce accuracy of many ML algorithms such as KNN and ANN (Maxwell et al. 2018). Upsampling is performed during resampling and prior data pre-processing.
+
+```{r fitcontrol_all}
+fitControl <- trainControl(method = "repeatedcv", number = 5, repeats = 5, sampling = "up")
+```
+
+```{r knn_training}
+set.seed(seed)
+cl <- makePSOCKcluster(19)
+timeStart<- proc.time()
+registerDoParallel(cl)
+knn_model<- train(lc ~ ., data = training,
+               method = "kknn",
+               preProcess = c("center", "scale"),
+               trControl = fitControl)
+stopCluster(cl)
+proc.time() - timeStart
+```
+
+```{r knn_model}
+print(knn_model)
+plot(knn_model, main = "KNN algorithm parameters tuning")
+knn_model$finalModel
+knn_varImp <- varImp(knn_model, compete = FALSE)
+plot(knn_varImp, main = "KNN algorithm training - variables importance")
+```
+
+```{r knn_pred_valid}
+pred_knn_model <- predict(knn_model, newdata = testing)
+confusionMatrix(data = pred_knn_model, testing$lc)
+```
+
+
+### ANN algorithm training
+
+```{r ann_training}
+set.seed(seed)
+cl <- makePSOCKcluster(19)
+timeStart<- proc.time()
+registerDoParallel(cl)
+ann_model <- train(lc ~ ., data = training,
+                method = "nnet",
+                preProcess = c("center", "scale"),
+                trControl = fitControl)
+stopCluster(cl)
+proc.time() - timeStart
+```
+
+```{r ann_model}
+print(ann_model)
+plot(ann_model, main = "ANN algorithm parameters tuning")
+ann_model$finalModel
+plotnet(ann_model$finalModel)
+olden(ann_model)
+```
+
+```{r ann_pred_valid}
+pred_ann <- predict(ann_model, newdata = testing)
+confusionMatrix(data = pred_ann, testing$lc)
+```
+
+
+### Boosted DT algorithm training
+
+```{r boost_training}
+set.seed(seed)
+cl <- makePSOCKcluster(19)
+timeStart <- proc.time()
+registerDoParallel(cl)
+boost_model <- train(lc~.,data = training,
+                          method = "C5.0",
+                  preProcess = c("center", "scale"),
+                  trControl = fitControl)
+stopCluster(cl)
+proc.time() - timeStart
+```
+
+```{r boost_model}
+print(boost_model)
+plot(boost_model)
+boost_varImp <- varImp(boost_model, compete = FALSE,  main = "BDT algorithm training - variables importance")
+ggplot(boost_varImp) + ggtitle("BDT algorithm training - variables importance")
+```
+
+```{r boost_pred_valid}
+pred_boost<- predict(boost_model,newdata = testing,
+                    na.action = na.pass)
+confusionMatrix(data = pred_boost, testing$lc)
+```
+
+
+### SVM algorithm training
+
+```{r svm_training}
+set.seed(seed)
+cl <- makePSOCKcluster(19)
+timeStart<- proc.time()
+registerDoParallel(cl)
+svm_model<-train(lc~.,data=training,
+                 method = "svmRadial",
+                 trControl = fitControl,
+                 preProc = c("center", "scale"),
+                 tuneLength = 3)
+stopCluster(cl)
+proc.time() - timeStart
+```
+
+```{r svm_model}
+print(svm_model)
+plot(svm_model, main = "SVM algorithm parameters tuning")
+svm_model$finalModel
+svm_varImp <- varImp(svm_model, compete = FALSE)
+plot(svm_varImp, main = "SVM algorithm training - variables importance" )
+```
+
+```{r svm_pred_valid}
+pred_svm<- predict(svm_model, newdata = testing)
+confusionMatrix(data = pred_svm, testing$lc)
+```
+
+```{r save_models}
+save(list = c("svm_model", "ann_model", "knn_model", "boost_model", "rf_model"),
+     file = paste0("models/", params$park, "_", params$year, ".RData"))
+```
+
+
+## ML classifiers comparative performance
+
+Use the models performance estimates to compare them and find out the best, based in overall accuracy of the testing data classification.
+
+```{r ml_comparative}
+resamps <- resamples(list(KNN = knn_model,
+                          ANN = ann_model,
+                          BOOST = boost_model,
+                          SVM = svm_model,
+                          RF = rf_model),
+                     decreasing = TRUE)
+
+summary (resamps)
+bwplot(resamps, layout = c(2, 1), main = "Machine learning algorithms performance comparative")
+```
+
+
+## Land Cover classifications
+
+The trained models are used to create land cover classifications. Results are reclassified to assign the correct land cover ids, as predict function assign continue values to classifications. Finally individual classifications are stacked and renamed. Stacked classifications are saved as an RData object.
+
+```{r reclass_matrix}
+reclass <- data.frame(class = 1:length(lc$ID), new_class = lc$ID)
+
+for(i in reclass$new_class) {
+  if(nchar(i) > 1 && !(i %in% c(10, 11, 12, 13))) {
+    reclass$new_class[which(reclass$new_class == i)] <- as.integer(substr(i, 1, 1))
+  }
+}
+
+reclass <- as.matrix(reclass)
+```
+
+
+### Random Forest classification
+
+```{r rf_classification}
+beginCluster()
+system.time(lc_rf <- reclassify(clusterR(landsat, predict, args = list(model = rf_model)), reclass))
+endCluster()
+
+tm_shape(lc_rf) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc),
+            palette = mycolors,
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Random Forest Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+### K-nearest neighbors classification
+
+```{r knn_classification}
+beginCluster()
+system.time(lc_knn <- reclassify(clusterR(landsat, predict, args = list(model = knn_model)), reclass))
+endCluster()
+
+tm_shape(lc_knn) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc),
+            palette = mycolors,
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- K Nearest Neighbors Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+### Artificial Neural Networks classification
+
+```{r ann_classification}
+beginCluster()
+system.time(lc_ann <- reclassify(clusterR(landsat, predict, args = list(model = ann_model)), reclass))
+endCluster()
+
+tm_shape(lc_ann) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc),
+            palette = mycolors,
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Artificial Neural Networks Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+### Boosted Decission Trees classification
+
+```{r boost_classification}
+beginCluster()
+system.time(lc_boost <- reclassify(clusterR(landsat, predict, args = list(model = boost_model)), reclass))
+endCluster()
+
+tm_shape(lc_boost) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc),
+            palette = mycolors,
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Boosted Decision Trees Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+### Support Vector Machines classification
+
+```{r svm_classification}
+beginCluster()
+system.time(lc_svm <- reclassify(clusterR(landsat, predict, args = list(model = svm_model)), reclass))
+endCluster()
+
+tm_shape(lc_svm) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc),
+            palette = mycolors,
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Support Vector Machines Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+## Ensemble classification using majority vote
+
+Stacks the five classifications.
+
+```{r stack classifications}
+classifications <- stack(lc_ann, lc_boost, lc_knn, lc_rf, lc_svm)
+classif_names <- c("lc_ann", "lc_boost", "lc_knn", "lc_rf", "lc_svm")
+names(classifications) <- classif_names
+
+saveRDS(classifications, file = paste0("stacked_classifications/", params$park, "_", params$year, ".RDS"))
+
+writeRaster(classifications,
+            filename = paste0("stacked_classifications/", params$park, "_", params$year, ".tif"),
+            format = "GTiff",
+            datatype='INT1U',
+            overwrite=TRUE)
+
+par(xpd = FALSE)
+plot(classifications, col = mycolors[names(mycolors) %in% lc$lc[lc$ID <= 13]], legend = FALSE, main = c("ANN classification", "BDT clasiffication", "KNN classification", "RF classification", "SVM classification"))
+par(xpd = TRUE)
+legend(x = 0.71, y = 0.31, legend = lc$lc[lc$ID <= 13], fill = mycolors, cex = 0.8, inset = 1)
+```
+
+Performs ensemble classifications using majority vote. Ties are defined randomly.
+
+```{r majority_vote}
+beginCluster()
+system.time(maj_class <- clusterR(classifications, modal, args = list(ties = "random")))
+endCluster()
+
+saveRDS(maj_class, file = paste0("majority_classifications/", params$park, "_", params$year))
+
+writeRaster(maj_class,
+            filename = paste0("majority_classifications/", params$park, "_", params$year, ".tif"),
+            format = "GTiff",
+            datatype='INT1U',
+            overwrite=TRUE)
+
+tm_shape(maj_class) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc[lc$ID <= 13]),
+            palette = mycolors[names(mycolors) %in% lc$lc[lc$ID <= 13]],
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Majority Vote Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+Returns the frequency of the modal value as a classifications agreement indicator. 
+
+```{r class_frequence}
+beginCluster()
+system.time(freq_class <- clusterR(classifications, modal, args = list(freq = TRUE)))
+endCluster()
+
+saveRDS(freq_class, file = paste0("frequency_raster/", params$park, "_" , params$year))
+
+writeRaster(freq_class,
+            filename = paste0("frequency_raster/", params$park, "_", params$year, ".tif"),
+            format = "GTiff",
+            datatype='INT1U',
+            overwrite=TRUE)
+
+plot(freq_class, main = paste(str_to_sentence(params$park), params$year, "- classifications agreement"))
+```
+
+
+## Post classification
+
+### Majority filter
+
+A 3x3 moving window computes focal pixel mode to remove salt and pepper noise from the classifications.
+
+```{r majority filter}
+set.seed(seed)
+maj_class_filter <- focal(maj_class, w = matrix(1, nrow=3, ncol=3), fun = modal, na.rm = TRUE)
+maj_class_filter[is.na(maj_class)] <- NA
+
+saveRDS(maj_class_filter, file = paste0("filtered_classifications/", params$park, "_" , params$year))
+
+writeRaster(maj_class_filter,
+            filename = paste0("filtered_classifications/", params$park, "_", params$year, ".tif"),
+            format = "GTiff",
+            datatype='INT1U',
+            overwrite=TRUE)
+
+tm_shape(maj_class_filter) +
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc[lc$ID <= 13]),
+            palette = mycolors[names(mycolors) %in% lc$lc[lc$ID <= 13]],
+            title = "Land Cover",) +
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Filtered Classification"), main.title.size = 1.5, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+### Clouds and shadows masking
+
+Creates a mask with clouds and shadows classes, and apply it to classifications.
+
+```{r nodata mask}
+mask_rcl <- matrix(c(NA, NA, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8, 1, 9,1, 10, NA, 11, NA, 12, 1, 13, 1), ncol = 2, byrow = TRUE)
+mask <- reclassify(maj_class_filter, mask_rcl, include.lowest = TRUE)
+maj_class_filter_mask <- mask(maj_class_filter, mask)
+
+saveRDS(maj_class_filter_mask, file = paste0("masked_classifications/", params$park, "_", params$year,  ".RDS"))
+
+writeRaster(maj_class_filter_mask,
+            filename = paste0("masked_classifications/", params$park, "_", params$year, ".tif"),
+            format = "GTiff",
+            datatype='INT1U',
+            overwrite=TRUE)
+
+tm_shape(maj_class_filter_mask) + 
+  tm_raster(style = "cat",
+            labels = as.character(lc$lc[lc$ID <= 13]),
+            palette = mycolors[names(mycolors) %in% lc$lc[lc$ID <= 13]],
+            title = "Land Cover",) + 
+  tm_layout(main.title = paste(str_to_sentence(params$park), params$year, "- Cloud and shadow masked Classification"), main.title.size = 1, main.title.position = c("center", "top")) +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+## Saving progress dataframe
+
+A data frame store the information of the protected areas already processed, to monitor the processing progress.
+
+```{r progress_vector}
+progress_df <- readRDS("progress_df/progress_df")
+progress_df[nrow(progress_df)+1,1] <- params$park
+progress_df[nrow(progress_df),2] <- params$year
+progress_df[nrow(progress_df),3] <- date()
+progress_df <- progress_df[order(progress_df$protected_area),]
+saveRDS(progress_df, file = "progress_df/progress_df")
+```
