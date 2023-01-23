@@ -1,0 +1,339 @@
+---
+title: "Friedman test"
+author: "Kristian Rubiano"
+date: "30/08/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1 Testing for normality
+
+### 1.1. Forest loss (%)  
+
+Forest loss = ((forest_t0 - forest_t1)/forest_t0)*100
+
+```{r}
+library(car)
+library(EnvStats)
+library(nortest)
+library(PMCMRplus)
+library(rstatix)
+
+data <- read.csv("maps_and_figures/boxplot_and_test/datos.csv")
+knitr::kable(data)
+```
+
+```{r}
+car::qqPlot(data$forest_loss_perc_p)
+```
+
+```{r}
+plot(density(data$forest_loss_perc_p), lwd = 2, col = "red", main = "Density")
+plot(density(data$forest_loss_perc_10), lwd = 2, col = "red", main = "Density")
+plot(density(data$forest_loss_perc_20), lwd = 2, col = "red", main = "Density")
+```
+
+Shapiro-Wilks test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05
+
+```{r}
+a <- shapiro.test(data$forest_loss_perc_p)
+a$p.value < 0.05
+
+b <- shapiro.test(data$forest_loss_perc_10)
+b$p.value < 0.05
+
+c <- shapiro.test(data$forest_loss_perc_20)
+c$p.value < 0.05
+```
+
+Kolmogorov-Smirnov test: if p-values is less than 0.05 we reject the null hypotesis (the data do not come from a normal distribution)
+
+```{r}
+a <- ks.test(data$forest_loss_perc_p, "pnorm")
+a$p.value < 0.05
+
+b <- ks.test(data$forest_loss_perc_10, "pnorm")
+b$p.value < 0.05
+
+c <- ks.test(data$forest_loss_perc_20, "pnorm")
+c$p.value < 0.05
+
+```
+
+Anderson-Darling test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05.
+
+```{r}
+a <- nortest::ad.test(data$forest_loss_perc_p)
+a$p.value < 0.05
+
+b <- nortest::ad.test(data$forest_loss_perc_10)
+b$p.value < 0.05
+
+a <- nortest::ad.test(data$forest_loss_perc_20)
+a$p.value < 0.05
+```
+
+Levene test: The test rejects the hypothesis of variance homogeneties when the p-value is less than or equal to 0.05.
+
+```{r}
+df_t <- as.data.frame(c(data$tnv_loss_perc_p, data$tnv_loss_perc_10, data$tnv_loss_perc_20))
+names(df_t) <- "tnv_loss_perc"
+
+df_t$forest_loss_perc <- c(data$forest_loss_perc_p, data$forest_loss_perc_10, data$forest_loss_perc_20)
+
+df_t$onv_loss_perc <- c(data$onv_loss_perc_p, data$onv_loss_perc_10, data$onv_loss_perc_20)
+
+df_t$group <- c(rep("p", length(data$tnv_loss_perc_p)), rep("b10", length(data$tnv_loss_perc_p)), rep("b20", length(data$tnv_loss_perc_p)))
+
+df_t$group <- ordered(df_t$group, levels = c("p", "b10", "b20"))
+levels(df_t$group)
+
+df_t$park <- rep(1:51, 3)
+
+a <- car::leveneTest(forest_loss_perc ~ group, df_t)
+a$`Pr(>F)` < 0.05
+
+```
+
+
+### 1.2. Other natural vegetation loss (%)  
+
+Other natural vegetation loss = ((onv_t0 - onv_t1)/onv_t0)*100
+
+```{r}
+car::qqPlot(data$onv_loss_perc_p)
+car::qqPlot(data$onv_loss_perc_10)
+car::qqPlot(data$onv_loss_perc_20)
+```
+
+```{r}
+plot(density(data$onv_loss_perc_p), lwd = 2, col = "red", main = "Density")
+plot(density(data$onv_loss_perc_10), lwd = 2, col = "red", main = "Density")
+plot(density(data$onv_loss_perc_20), lwd = 2, col = "red", main = "Density")
+```
+Shapiro-Wilks test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05
+
+
+```{r}
+a <- shapiro.test(data$onv_loss_perc_p)
+a$p.value < 0.05
+
+b <- shapiro.test(data$onv_loss_perc_10)
+b$p.value < 0.05
+
+c <- shapiro.test(data$onv_loss_perc_20)
+c$p.value < 0.05
+```
+
+Kolmogorov-Smirnov test: if p-values is less than 0.05 we reject the null hypotesis (the data do not come from a normal distribution)
+
+```{r}
+a <- ks.test(data$onv_loss_perc_p, "pnorm")
+a$p.value < 0.05
+
+b <- ks.test(data$onv_loss_perc_10, "pnorm")
+b$p.value < 0.05
+
+c <- ks.test(data$onv_loss_perc_20, "pnorm")
+c$p.value < 0.05
+
+```
+
+Anderson-Darling test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05.
+
+```{r}
+a <- nortest::ad.test(data$onv_loss_perc_p)
+a$p.value < 0.05
+
+b <- nortest::ad.test(data$onv_loss_perc_10)
+b$p.value < 0.05
+
+c <- nortest::ad.test(data$onv_loss_perc_20)
+c$p.value < 0.05
+```
+
+Levene test: The test rejects the hypothesis of variance homogeneties when the p-value is less than or equal to 0.05.
+
+```{r}
+a <- car::leveneTest(onv_loss_perc ~ group, df_t)
+a$`Pr(>F)` < 0.05
+
+```
+
+
+### 1.3. Total natural vegetation loss (%)  
+
+Total natural vegetation loss = ((tnv_t0 - tnv_t1)/tnv_t0)*100
+
+
+```{r}
+car::qqPlot(data$tnv_loss_perc_p)
+car::qqPlot(data$tnv_loss_perc_10)
+car::qqPlot(data$tnv_loss_perc_20)
+```
+
+```{r}
+plot(density(data$tnv_loss_perc_p), lwd = 2, col = "red", main = "Density")
+plot(density(data$tnv_loss_perc_10), lwd = 2, col = "red", main = "Density")
+plot(density(data$tnv_loss_perc_20), lwd = 2, col = "red", main = "Density")
+```
+
+Shapiro-Wilks test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05
+
+```{r}
+a <- shapiro.test(data$tnv_loss_perc_p)
+a$p.value < 0.05
+
+b <- shapiro.test(data$tnv_loss_perc_10)
+b$p.value < 0.05
+
+c <- shapiro.test(data$tnv_loss_perc_20)
+c$p.value < 0.05
+```
+
+Kolmogorov-Smirnov test: if p-values is less than 0.05 we reject the null hypotesis (the data do not come from a normal distribution)
+
+```{r}
+a <- ks.test(data$tnv_loss_perc_p, "pnorm")
+a$p.value < 0.05
+
+b <- ks.test(data$tnv_loss_perc_10, "pnorm")
+b$p.value < 0.05
+
+c <- ks.test(data$tnv_loss_perc_20, "pnorm")
+c$p.value < 0.05
+
+```
+
+Anderson-Darling test: The test rejects the hypothesis of normality when the p-value is less than or equal to 0.05.
+
+```{r}
+a <- nortest::ad.test(data$tnv_loss_perc_p)
+a$p.value < 0.05
+
+b <- nortest::ad.test(data$tnv_loss_perc_10)
+b$p.value < 0.05
+
+c <- nortest::ad.test(data$tnv_loss_perc_20)
+c$p.value < 0.05
+```
+
+Levene test: The test rejects the hypothesis of variance homogeneties when the p-value is less than or equal to 0.05.
+
+```{r}
+a <- car::leveneTest(tnv_loss_perc ~ group, df_t)
+a$`Pr(>F)` < 0.05
+
+```
+
+
+### 1.4. Conclusion  
+
+Data seems not to follow a normal distribution. Then a non parametric test is needed.
+
+Friedman test is chosen.
+
+Armenteras, Rodriguez & Retana  (2009), Biological conservation, compared change rates whithin PAs and their buffers. They assumed the data to be paired.
+
+Other test options can be found in Rodriguez, Armenteras & Retana (2013), Regional Environmental Change. They used repeated measures ANOVA, but it's a parametric test.
+
+#### 2 Kruskal-Wallis and Friedman tests
+
+### 2.1. Forest loss (%)
+
+```{r}
+a <- kruskal.test(forest_loss_perc ~ group, data = df_t)
+a
+a$p.value < 0.05
+
+```
+
+```{r}
+pairwise.wilcox.test(df_t$forest_loss_perc, df_t$group, p.adjust.method = "BH")
+```
+
+```{r}
+a <- friedman.test(forest_loss_perc ~ group | park, data = df_t)
+a
+a$p.value < 0.05
+```
+
+
+### 2.2. Other natural vegetation loss (%)
+
+```{r}
+a <- kruskal.test(onv_loss_perc ~ group, data = df_t)
+a
+a$p.value < 0.05
+
+```
+
+```{r}
+pairwise.wilcox.test(df_t$onv_loss_perc, df_t$group, p.adjust.method = "BH")
+```
+
+```{r}
+a <- friedman.test(onv_loss_perc ~ group | park, data = df_t)
+a
+a$p.value < 0.05
+```
+
+
+### 2.3. Total natural vegetation loss (%)
+
+```{r}
+a <- kruskal.test(tnv_loss_perc ~ group, data = df_t)
+a
+a$p.value < 0.05
+```
+
+```{r}
+pairwise.wilcox.test(df_t$tnv_loss_perc, df_t$group, p.adjust.method = "BH")
+```
+
+```{r}
+# data_tnv <- matrix(c(data$tnv_loss_perc_p, data$tnv_loss_perc_10, data$tnv_loss_perc_20), ncol = 3, nrow = 51, byrow = FALSE, dimnames = list(1:(51), c("p", "b1", "b2")))
+
+PMCMRplus::friedmanTest(y = data_tnv, g = df_t$group, b = df_t$park)
+
+ft <- friedman_test(formula = tnv_loss_perc ~ group | park, data = df_t)
+# ft_label <- get_test_label(ft, detailed = TRUE)
+ft
+
+
+
+b <- create_test_label(n = 51,
+  statistic.text = "χ2", statistic = 45.8,
+  parameter = 2,
+  p = "<0.0001",
+  description = "Friedman test",
+  type = "text",
+  detailed = TRUE
+)
+b
+
+get_pwc_label()
+
+```
+
+```{r}
+fe <- friedman_effsize(formula = tnv_loss_perc ~ group | park, data = df_t, conf.level = 0.95, ci = TRUE)
+fe
+
+```
+
+```{r}
+# pairwise.wilcox.test(x = df_t$tnv_loss_perc, g = df_t$group, p.adjust.method = "bonferroni", paired = TRUE)
+# PMCMRplus::frdAllPairsExactTest(y = df_t$tnv_loss_perc, g = df_t$group, b = df_t$park, p.adjust.method = "bonferroni")
+# PMCMRplus::frdAllPairsNemenyiTest(y = df_t$tnv_loss_perc, g = df_t$group, b = df_t$park, p.adjust.method = "bonferroni")
+# PMCMRplus::frdAllPairsSiegelTest(y = df_t$tnv_loss_perc, g = df_t$group, b = df_t$park, p.adjust.method = "bonferroni")
+# PMCMRplus::frdAllPairsMillerTest(y = df_t$tnv_loss_perc, g = df_t$group, b = df_t$park, p.adjust.method = "bonferroni")
+
+pht <- PMCMRplus::frdAllPairsConoverTest(y = df_t$tnv_loss_perc, g = df_t$group, b = df_t$park, p.adjust.method = "bonferroni")
+pht
+
+```
+
